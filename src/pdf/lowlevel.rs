@@ -6,13 +6,14 @@
 //! It is recommended to use the [`PdfBuilder`](../struct.PdfBuilder.html) build methods which manage all of these details,
 //! however, some usage scenarios (e.g. adding multiple objects to your PDF) may require
 //! using this lower-level module to achieve sufficient control.
+use lazy_static::lazy_static;
+use log::{debug, error, warn};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int};
 use std::sync::{mpsc, Arc, Mutex};
 use std::{ptr, slice};
-use thread_id;
 use wkhtmltox_sys::pdf::*;
 
 use super::{Error, PdfOutput, Result};
@@ -73,7 +74,7 @@ pub struct PdfConverter {
     converter: *mut wkhtmltopdf_converter,
     // PdfGlobalSettings::drop also manages wkhtmktopdf_deinit, take ownership to delay drop
     _global: PdfGlobalSettings,
-    warning_callback: Arc<Mutex<Option<Box<dyn FnMut(String) + 'static + Send>>>>
+    warning_callback: Arc<Mutex<Option<Box<dyn FnMut(String) + 'static + Send>>>>,
 }
 
 /// Initializes wkhtmltopdf
@@ -164,7 +165,7 @@ impl PdfGlobalSettings {
         PdfConverter {
             converter,
             _global: self,
-            warning_callback: Arc::new(Mutex::new(None))
+            warning_callback: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -202,7 +203,11 @@ impl PdfConverter {
         pdf_object.needs_delete = false;
     }
 
-    pub fn set_warning_callback(&mut self, on_warning: Option<Box<dyn FnMut(String) + 'static + Send>>) {
+    /// Call the warning function when a warning is issued
+    pub fn set_warning_callback(
+        &mut self,
+        on_warning: Option<Box<dyn FnMut(String) + 'static + Send>>,
+    ) {
         let mut warning_callback = self.warning_callback.lock().expect("failed acquiring lock");
         *warning_callback = on_warning;
     }
@@ -248,24 +253,24 @@ impl PdfConverter {
     fn setup_callbacks(&self) -> mpsc::Receiver<Result<()>> {
         let (tx, rx) = mpsc::channel();
         let errors = Arc::new(Mutex::new(Vec::new()));
-        
+
         let tx_finished = tx;
         let errors_finished = errors.clone();
         let on_finished = move |i| {
             let errors = errors_finished.lock().unwrap();
-            
+
             let res = match i {
                 1 => Ok(()),
                 _ => Err(Error::ConversionFailed(errors.join(", "))),
             };
             let _ = tx_finished.send(res);
         };
-        
+
         let on_error = move |err| {
             let mut errors = errors.lock().unwrap();
             errors.push(err);
         };
-        
+
         let warning_cb = self.warning_callback.clone();
         let on_warning = move |warn| {
             let mut cb = warning_cb.lock().unwrap();
@@ -402,7 +407,10 @@ unsafe extern "C" fn error_callback(converter: *mut wkhtmltopdf_converter, msg_p
     }
 }
 
-unsafe extern fn warning_callback(converter: *mut wkhtmltopdf_converter, msg_ptr: *const c_char) {
+unsafe extern "C" fn warning_callback(
+    converter: *mut wkhtmltopdf_converter,
+    msg_ptr: *const c_char,
+) {
     let cstr = CStr::from_ptr(msg_ptr);
     let mut callbacks = WARNING_CALLBACKS.lock().unwrap();
     let id = converter as usize;
